@@ -1,0 +1,2615 @@
+====================================================================
+==== FILE: backend/package.json ====
+====================================================================
+
+{
+  "name": "earth-pulse-irrigate-backend",
+  "version": "1.0.0",
+  "description": "Backend for the smart irrigation system",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon -r dotenv/config server.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "Joshua, Mallikarjun, Sanket",
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^1.9.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "mongoose": "^8.5.1",
+    "node-cron": "^3.0.3"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.4"
+  }
+}
+
+
+====================================================================
+==== FILE: backend/.env ====
+====================================================================
+
+# MongoDB Connection String
+MONGODB_URI=mongodb://127.0.0.1:27017/earth_pulse_irrigate
+
+# Server Port
+PORT=5001
+
+# Node Environment
+NODE_ENV=development
+
+OPENWEATHER_API_KEY=4b1d858ffea7d146a1089dcea72daeb1
+
+====================================================================
+==== FILE: backend/server.js ====
+====================================================================
+
+const express = require('express');
+const mongoose = require('mongoose');
+const cors = require('cors');
+const dotenv = require('dotenv');
+const cron = require('node-cron');
+
+dotenv.config();
+
+// Import routes
+const cropRoutes = require('./routes/crops');
+const sensorRoutes = require('./routes/sensors');
+const weatherRoutes = require('./routes/weather');
+const irrigationRoutes = require('./routes/irrigation');
+const aiRoutes = require('./routes/ai');
+
+// Import services
+const { updateIrrigationRecommendations } = require('./services/irrigationService');
+const { generateSensorData } = require('./services/sensorService');
+
+const app = express();
+const PORT = process.env.PORT || 5000;
+
+// Middleware
+app.use(cors());
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// MongoDB connection
+// MongoDB connection
+mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/irrigation_system')
+.then(() => console.log('Connected to MongoDB'))
+.catch((error) => console.error('MongoDB connection error:', error));
+
+// Routes
+app.use('/api/crops', cropRoutes);
+app.use('/api/sensors', sensorRoutes);
+app.use('/api/weather', weatherRoutes);
+app.use('/api/irrigation', irrigationRoutes);
+app.use('/api/ai', aiRoutes);
+
+// Health check endpoint
+app.get('/api/health', (req, res) => {
+  res.json({ 
+    status: 'OK', 
+    timestamp: new Date().toISOString(),
+    message: 'Irrigation System Backend is running'
+  });
+});
+
+// Scheduled tasks
+// Update irrigation recommendations every hour
+cron.schedule('0 * * * *', async () => {
+  console.log('Running scheduled irrigation recommendations update...');
+  try {
+    await updateIrrigationRecommendations();
+    console.log('Irrigation recommendations updated successfully');
+  } catch (error) {
+    console.error('Error updating irrigation recommendations:', error);
+  }
+});
+
+// Generate sensor data every 5 minutes (for demo purposes)
+cron.schedule('*/5 * * * *', async () => {
+  try {
+    await generateSensorData();
+    console.log('Sensor data generated successfully');
+  } catch (error) {
+    console.error('Error generating sensor data:', error);
+  }
+});
+
+// Error handling middleware
+// --- NEW ROBUST ERROR HANDLING MIDDLEWARE ---
+app.use((error, req, res, next) => {
+  // Log the full error stack for debugging
+  console.error("--- GLOBAL ERROR HANDLER ---");
+  console.error("Error Status:", error.status);
+  console.error("Error Message:", error.message);
+  console.error("Request Body:", req.body); // See what body caused the error
+  console.error(error.stack); // Full stack trace
+  console.error("--------------------------");
+
+  // If the error is from the body-parser (malformed JSON)
+  if (error instanceof SyntaxError && error.status === 400 && 'body' in error) {
+    return res.status(400).json({
+      success: false,
+      message: 'Malformed JSON in request body.',
+      error: error.message
+    });
+  }
+
+  // General error response
+  res.status(error.status || 500).json({
+    success: false,
+    message: error.message || 'Internal Server Error',
+    error: error.stack // Send stack in dev mode for easier debugging
+  });
+});
+
+// 404 handler
+app.use('*', (req, res) => {
+  res.status(404).json({
+    error: {
+      message: 'Route not found',
+      status: 404
+    }
+  });
+});
+
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+  console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+});
+
+====================================================================
+==== FILE: backend/models/Crop.js ====
+====================================================================
+
+const mongoose = require('mongoose');
+
+const cropSchema = new mongoose.Schema({
+  name: {
+    type: String,
+    required: true,
+    trim: true
+  },
+  stage: {
+    type: String,
+    enum: ['Seedling', 'Growing', 'Mature', 'Harvesting'],
+    required: true
+  },
+  waterNeeds: {
+    type: String,
+    enum: ['Low', 'Medium', 'Medium-High', 'High'],
+    required: true
+  },
+  plantedDate: {
+    type: Date,
+    required: true
+  },
+  nextWatering: {
+    type: Date,
+    required: true
+  },
+  lastWatered: {
+    type: Date,
+    default: null
+  },
+  waterRequirement: {
+    // Water requirement in liters per day
+    dailyAmount: {
+      type: Number,
+      required: true
+    },
+    // Frequency in days
+    frequency: {
+      type: Number,
+      required: true
+    }
+  },
+  location: {
+    section: {
+      type: String,
+      required: true
+    },
+    coordinates: {
+      latitude: Number,
+      longitude: Number
+    }
+  },
+  soilType: {
+    type: String,
+    enum: ['Sandy', 'Clay', 'Loamy', 'Silty'],
+    default: 'Loamy'
+  },
+  cropType: {
+    type: String,
+    required: true
+  },
+  variety: {
+    type: String,
+    default: ''
+  },
+  expectedHarvestDate: {
+    type: Date
+  },
+  growthStageHistory: [{
+    stage: String,
+    date: Date,
+    notes: String
+  }],
+  irrigationHistory: [{
+    date: Date,
+    amount: Number, // in liters
+    method: {
+      type: String,
+      enum: ['Manual', 'Automatic', 'Scheduled'],
+      default: 'Manual'
+    },
+    duration: Number, // in minutes
+    notes: String
+  }],
+  healthStatus: {
+    type: String,
+    enum: ['Excellent', 'Good', 'Fair', 'Poor', 'Critical'],
+    default: 'Good'
+  },
+  notes: {
+    type: String,
+    default: ''
+  },
+  isActive: {
+    type: Boolean,
+    default: true
+  },
+  alerts: [{
+    type: {
+      type: String,
+      enum: ['WaterDeficit', 'Overwatering', 'StageChange', 'Maintenance', 'Harvest']
+    },
+    message: String,
+    severity: {
+      type: String,
+      enum: ['Low', 'Medium', 'High', 'Critical'],
+      default: 'Medium'
+    },
+    isRead: {
+      type: Boolean,
+      default: false
+    },
+    createdAt: {
+      type: Date,
+      default: Date.now
+    }
+  }],
+
+  aiSchedule: {
+    schedule: [Number], // Array of 14 0s and 1s
+    quantity: [Number], // Array of 14 numbers for water quantity
+    generatedAt: Date,
+    source: {
+        type: String,
+        default: 'ViT-Model'
+    }
+  }
+}, {
+  timestamps: true,
+  toJSON: { virtuals: true },
+  toObject: { virtuals: true }
+});
+
+// Virtual for days since planted
+cropSchema.virtual('daysSincePlanted').get(function() {
+  return Math.floor((Date.now() - this.plantedDate.getTime()) / (1000 * 60 * 60 * 24));
+});
+
+// Virtual for days until next watering
+cropSchema.virtual('daysUntilWatering').get(function() {
+  return Math.ceil((this.nextWatering.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+});
+
+// Virtual for irrigation status
+cropSchema.virtual('irrigationStatus').get(function() {
+  const now = new Date();
+  const timeDiff = this.nextWatering.getTime() - now.getTime();
+  const hoursDiff = timeDiff / (1000 * 60 * 60);
+  
+  if (hoursDiff < 0) return 'Overdue';
+  if (hoursDiff < 24) return 'Due Soon';
+  if (hoursDiff < 48) return 'Upcoming';
+  return 'Scheduled';
+});
+
+// Methods
+cropSchema.methods.waterCrop = function(amount, method = 'Manual', duration = 0, notes = '') {
+  this.lastWatered = new Date();
+  this.irrigationHistory.push({
+    date: new Date(),
+    amount,
+    method,
+    duration,
+    notes
+  });
+  
+  // Calculate next watering date based on crop requirements
+  this.calculateNextWatering();
+  
+  return this.save();
+};
+
+cropSchema.methods.calculateNextWatering = function() {
+  const baseFrequency = this.waterRequirement.frequency;
+  let adjustedFrequency = baseFrequency;
+  
+  // Adjust frequency based on crop stage
+  switch(this.stage) {
+    case 'Seedling':
+      adjustedFrequency = Math.max(1, baseFrequency - 1); // More frequent watering
+      break;
+    case 'Growing':
+      adjustedFrequency = baseFrequency;
+      break;
+    case 'Mature':
+      adjustedFrequency = baseFrequency + 1; // Less frequent watering
+      break;
+    case 'Harvesting':
+      adjustedFrequency = baseFrequency + 1;
+      break;
+  }
+  
+  const nextWateringDate = new Date();
+  nextWateringDate.setDate(nextWateringDate.getDate() + adjustedFrequency);
+  this.nextWatering = nextWateringDate;
+};
+
+cropSchema.methods.updateStage = function(newStage, notes = '') {
+  const oldStage = this.stage;
+  this.stage = newStage;
+  
+  this.growthStageHistory.push({
+    stage: newStage,
+    date: new Date(),
+    notes: notes || `Stage changed from ${oldStage} to ${newStage}`
+  });
+  
+  // Recalculate watering schedule for new stage
+  this.calculateNextWatering();
+  
+  return this.save();
+};
+
+// Static methods
+cropSchema.statics.getCropsNeedingWater = function(daysAhead = 1) {
+  const targetDate = new Date();
+  targetDate.setDate(targetDate.getDate() + daysAhead);
+  
+  return this.find({
+    nextWatering: { $lte: targetDate },
+    isActive: true
+  });
+};
+
+cropSchema.statics.getCropsByStage = function(stage) {
+  return this.find({ stage, isActive: true });
+};
+
+// Indexes for better performance
+cropSchema.index({ nextWatering: 1, isActive: 1 });
+cropSchema.index({ stage: 1, isActive: 1 });
+cropSchema.index({ plantedDate: 1 });
+cropSchema.index({ 'location.section': 1 });
+
+module.exports = mongoose.model('Crop', cropSchema);
+
+====================================================================
+==== FILE: backend/models/Irrigation.js ====
+====================================================================
+
+const mongoose = require('mongoose');
+
+// Irrigation Recommendation Schema
+const irrigationRecommendationSchema = new mongoose.Schema({
+  cropId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Crop',
+    required: true
+  },
+  recommendation: {
+    action: {
+      type: String,
+      enum: ['Water today', 'Water tomorrow', 'Water in 2 days', 'Water in 3 days', 'No watering needed'],
+      required: true
+    },
+    priority: {
+      type: String,
+      enum: ['Critical', 'High', 'Medium', 'Low'],
+      required: true
+    },
+    waterAmount: {
+      type: Number, // in liters
+      required: true
+    },
+    duration: {
+      type: Number, // in minutes
+      required: true
+    },
+    method: {
+      type: String,
+      enum: ['Drip', 'Sprinkler', 'Manual', 'Flood'],
+      default: 'Drip'
+    }
+  },
+  factors: {
+    soilMoisture: Number,
+    weatherForecast: String,
+    cropStage: String,
+    lastWatered: Date,
+    temperature: Number,
+    humidity: Number
+  },
+  confidence: {
+    type: Number,
+    min: 0,
+    max: 100,
+    required: true
+  },
+  status: {
+    type: String,
+    enum: ['Pending', 'Approved', 'Rejected', 'Completed'],
+    default: 'Pending'
+  },
+  scheduledDate: Date,
+  completedDate: Date,
+  notes: String,
+  createdBy: {
+    type: String,
+    enum: ['System', 'User'],
+    default: 'System'
+  }
+}, {
+  timestamps: true
+});
+
+// Irrigation Schedule Schema
+const irrigationScheduleSchema = new mongoose.Schema({
+  cropId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Crop',
+    required: true
+  },
+  scheduledDate: {
+    type: Date,
+    required: true
+  },
+  waterAmount: {
+    type: Number,
+    required: true
+  },
+  duration: {
+    type: Number,
+    required: true
+  },
+  method: {
+    type: String,
+    enum: ['Drip', 'Sprinkler', 'Manual', 'Flood'],
+    default: 'Drip'
+  },
+  status: {
+    type: String,
+    enum: ['Scheduled', 'InProgress', 'Completed', 'Cancelled', 'Failed'],
+    default: 'Scheduled'
+  },
+  isRecurring: {
+    type: Boolean,
+    default: false
+  },
+  recurringPattern: {
+    frequency: {
+      type: String,
+      enum: ['Daily', 'Weekly', 'BiWeekly', 'Custom']
+    },
+    interval: Number, // days
+    endDate: Date
+  },
+  executionDetails: {
+    startTime: Date,
+    endTime: Date,
+    actualWaterAmount: Number,
+    actualDuration: Number,
+    success: Boolean,
+    errors: [String]
+  },
+  autoExecute: {
+    type: Boolean,
+    default: false
+  },
+  createdBy: {
+    type: String,
+    default: 'System'
+  },
+  notes: String
+}, {
+  timestamps: true
+});
+
+// Irrigation System Schema
+const irrigationSystemSchema = new mongoose.Schema({
+  name: {
+    type: String,
+    required: true
+  },
+  type: {
+    type: String,
+    enum: ['Drip', 'Sprinkler', 'Flood', 'Micro-sprinkler'],
+    required: true
+  },
+  location: {
+    section: String,
+    coordinates: {
+      latitude: Number,
+      longitude: Number
+    }
+  },
+  status: {
+    type: String,
+    enum: ['Active', 'Inactive', 'Maintenance', 'Error'],
+    default: 'Active'
+  },
+  capacity: {
+    flowRate: Number, // liters per minute
+    pressure: Number, // bar
+    coverage: Number  // square meters
+  },
+  connectedCrops: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Crop'
+  }],
+  maintenanceSchedule: {
+    lastMaintenance: Date,
+    nextMaintenance: Date,
+    maintenanceInterval: Number // days
+  },
+  operationHistory: [{
+    date: Date,
+    operation: String,
+    duration: Number,
+    waterAmount: Number,
+    status: String,
+    notes: String
+  }],
+  settings: {
+    autoMode: {
+      type: Boolean,
+      default: false
+    },
+    operatingHours: {
+      start: String, // HH:MM
+      end: String    // HH:MM
+    },
+    waterSource: String,
+    filterType: String
+  }
+}, {
+  timestamps: true
+});
+
+// Methods for IrrigationRecommendation
+irrigationRecommendationSchema.methods.approve = function(notes = '') {
+  this.status = 'Approved';
+  this.notes = notes;
+  return this.save();
+};
+
+irrigationRecommendationSchema.methods.reject = function(reason = '') {
+  this.status = 'Rejected';
+  this.notes = reason;
+  return this.save();
+};
+
+irrigationRecommendationSchema.methods.complete = function() {
+  this.status = 'Completed';
+  this.completedDate = new Date();
+  return this.save();
+};
+
+// Methods for IrrigationSchedule
+irrigationScheduleSchema.methods.execute = async function() {
+  this.status = 'InProgress';
+  this.executionDetails.startTime = new Date();
+  
+  try {
+    // Simulate irrigation execution
+    // In real implementation, this would control actual irrigation hardware
+    await new Promise(resolve => setTimeout(resolve, 1000)); // Simulate execution time
+    
+    this.status = 'Completed';
+    this.executionDetails.endTime = new Date();
+    this.executionDetails.actualWaterAmount = this.waterAmount;
+    this.executionDetails.actualDuration = this.duration;
+    this.executionDetails.success = true;
+    
+    // Update crop's last watered date
+    const Crop = mongoose.model('Crop');
+    await Crop.findByIdAndUpdate(this.cropId, {
+      lastWatered: new Date(),
+      $push: {
+        irrigationHistory: {
+          date: new Date(),
+          amount: this.waterAmount,
+          method: 'Automatic',
+          duration: this.duration,
+          notes: 'Scheduled irrigation completed'
+        }
+      }
+    });
+    
+    return this.save();
+  } catch (error) {
+    this.status = 'Failed';
+    this.executionDetails.endTime = new Date();
+    this.executionDetails.success = false;
+    this.executionDetails.errors.push(error.message);
+    return this.save();
+  }
+};
+
+irrigationScheduleSchema.methods.cancel = function(reason = '') {
+  this.status = 'Cancelled';
+  this.notes = reason;
+  return this.save();
+};
+
+// Static methods
+irrigationRecommendationSchema.statics.getPendingRecommendations = function() {
+  return this.find({ status: 'Pending' })
+    .populate('cropId', 'name stage waterNeeds location')
+    .sort({ 'recommendation.priority': 1, createdAt: 1 });
+};
+
+irrigationRecommendationSchema.statics.getRecommendationsByCrop = function(cropId) {
+  return this.find({ cropId })
+    .sort({ createdAt: -1 });
+};
+
+irrigationScheduleSchema.statics.getTodaysSchedule = function() {
+  const today = new Date();
+  const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  const endOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1);
+  
+  return this.find({
+    scheduledDate: { $gte: startOfDay, $lt: endOfDay },
+    status: { $in: ['Scheduled', 'InProgress'] }
+  }).populate('cropId', 'name location');
+};
+
+irrigationScheduleSchema.statics.getUpcomingSchedule = function(days = 7) {
+  const today = new Date();
+  const futureDate = new Date(today.getTime() + (days * 24 * 60 * 60 * 1000));
+  
+  return this.find({
+    scheduledDate: { $gte: today, $lte: futureDate },
+    status: 'Scheduled'
+  }).populate('cropId', 'name location').sort({ scheduledDate: 1 });
+};
+
+// Indexes
+irrigationRecommendationSchema.index({ cropId: 1, status: 1 });
+irrigationRecommendationSchema.index({ createdAt: -1 });
+irrigationRecommendationSchema.index({ scheduledDate: 1 });
+
+irrigationScheduleSchema.index({ cropId: 1, status: 1 });
+irrigationScheduleSchema.index({ scheduledDate: 1, status: 1 });
+irrigationScheduleSchema.index({ createdAt: -1 });
+
+irrigationSystemSchema.index({ status: 1 });
+irrigationSystemSchema.index({ 'location.section': 1 });
+
+const IrrigationRecommendation = mongoose.model('IrrigationRecommendation', irrigationRecommendationSchema);
+const IrrigationSchedule = mongoose.model('IrrigationSchedule', irrigationScheduleSchema);
+const IrrigationSystem = mongoose.model('IrrigationSystem', irrigationSystemSchema);
+
+module.exports = {
+  IrrigationRecommendation,
+  IrrigationSchedule,
+  IrrigationSystem
+};
+
+====================================================================
+==== FILE: backend/models/Sensor.js ====
+====================================================================
+
+const mongoose = require('mongoose');
+
+// Sensor Reading Schema
+const sensorReadingSchema = new mongoose.Schema({
+  sensorId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Sensor',
+    required: true
+  },
+  readings: {
+    soilMoisture: {
+      type: Number,
+      min: 0,
+      max: 100 // Percentage
+    },
+    temperature: {
+      type: Number,
+      min: -50,
+      max: 100 // Celsius
+    },
+    humidity: {
+      type: Number,
+      min: 0,
+      max: 100 // Percentage
+    },
+    lightIntensity: {
+      type: Number,
+      min: 0,
+      max: 100000 // Lux
+    },
+    pH: {
+      type: Number,
+      min: 0,
+      max: 14
+    },
+    nutrients: {
+      nitrogen: Number,
+      phosphorus: Number,
+      potassium: Number
+    }
+  },
+  timestamp: {
+    type: Date,
+    default: Date.now
+  },
+  quality: {
+    type: String,
+    enum: ['Good', 'Fair', 'Poor'],
+    default: 'Good'
+  }
+}, {
+  timestamps: true
+});
+
+// Sensor Schema
+const sensorSchema = new mongoose.Schema({
+  name: {
+    type: String,
+    required: true,
+    trim: true
+  },
+  type: {
+    type: String,
+    enum: ['SoilMoisture', 'Temperature', 'Humidity', 'pH', 'Light', 'Nutrient', 'Multi'],
+    required: true
+  },
+  location: {
+    section: {
+      type: String,
+      required: true
+    },
+    coordinates: {
+      latitude: Number,
+      longitude: Number
+    },
+    depth: Number // for soil sensors
+  },
+  status: {
+    type: String,
+    enum: ['Active', 'Inactive', 'Maintenance', 'Error'],
+    default: 'Active'
+  },
+  lastReading: {
+    type: Date,
+    default: null
+  },
+  batteryLevel: {
+    type: Number,
+    min: 0,
+    max: 100,
+    default: 100
+  },
+  calibrationDate: {
+    type: Date,
+    default: Date.now
+  },
+  alertThresholds: {
+    soilMoisture: {
+      min: { type: Number, default: 20 },
+      max: { type: Number, default: 80 }
+    },
+    temperature: {
+      min: { type: Number, default: 5 },
+      max: { type: Number, default: 35 }
+    },
+    humidity: {
+      min: { type: Number, default: 40 },
+      max: { type: Number, default: 90 }
+    },
+    pH: {
+      min: { type: Number, default: 6.0 },
+      max: { type: Number, default: 7.5 }
+    }
+  },
+  associatedCrops: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Crop'
+  }],
+  notes: {
+    type: String,
+    default: ''
+  }
+}, {
+  timestamps: true,
+  toJSON: { virtuals: true },
+  toObject: { virtuals: true }
+});
+
+// Weather Data Schema
+const weatherSchema = new mongoose.Schema({
+  location: {
+    name: String,
+    coordinates: {
+      latitude: Number,
+      longitude: Number
+    }
+  },
+  current: {
+    temperature: Number,
+    humidity: Number,
+    windSpeed: Number,
+    windDirection: Number,
+    pressure: Number,
+    visibility: Number,
+    uvIndex: Number,
+    cloudCover: Number,
+    condition: String,
+    precipitation: Number
+  },
+  forecast: [{
+    date: Date,
+    temperature: {
+      min: Number,
+      max: Number
+    },
+    humidity: Number,
+    precipitation: {
+      probability: Number,
+      amount: Number
+    },
+    windSpeed: Number,
+    condition: String
+  }],
+  timestamp: {
+    type: Date,
+    default: Date.now
+  }
+}, {
+  timestamps: true
+});
+
+// Virtual for sensor health status
+sensorSchema.virtual('healthStatus').get(function() {
+  if (this.status === 'Error') return 'Critical';
+  if (this.batteryLevel < 20) return 'Low Battery';
+  if (this.lastReading && (Date.now() - this.lastReading.getTime()) > 24 * 60 * 60 * 1000) {
+    return 'No Recent Data';
+  }
+  return 'Good';
+});
+
+// Methods
+sensorSchema.methods.addReading = function(readings) {
+  this.lastReading = new Date();
+  
+  // Create new sensor reading
+  const SensorReading = mongoose.model('SensorReading');
+  const newReading = new SensorReading({
+    sensorId: this._id,
+    readings: readings
+  });
+  
+  return newReading.save();
+};
+
+sensorSchema.methods.getLatestReading = function() {
+  const SensorReading = mongoose.model('SensorReading');
+  return SensorReading.findOne({ sensorId: this._id }).sort({ timestamp: -1 });
+};
+
+sensorSchema.methods.getReadingsInRange = function(startDate, endDate) {
+  const SensorReading = mongoose.model('SensorReading');
+  return SensorReading.find({
+    sensorId: this._id,
+    timestamp: { $gte: startDate, $lte: endDate }
+  }).sort({ timestamp: -1 });
+};
+
+sensorSchema.methods.checkAlerts = async function() {
+  const latestReading = await this.getLatestReading();
+  if (!latestReading) return [];
+  
+  const alerts = [];
+  const readings = latestReading.readings;
+  const thresholds = this.alertThresholds;
+  
+  // Check soil moisture
+  if (readings.soilMoisture !== undefined) {
+    if (readings.soilMoisture < thresholds.soilMoisture.min) {
+      alerts.push({
+        type: 'SoilMoisture',
+        message: `Low soil moisture: ${readings.soilMoisture}%`,
+        severity: 'High',
+        value: readings.soilMoisture
+      });
+    } else if (readings.soilMoisture > thresholds.soilMoisture.max) {
+      alerts.push({
+        type: 'SoilMoisture',
+        message: `High soil moisture: ${readings.soilMoisture}%`,
+        severity: 'Medium',
+        value: readings.soilMoisture
+      });
+    }
+  }
+  
+  // Check temperature
+  if (readings.temperature !== undefined) {
+    if (readings.temperature < thresholds.temperature.min || 
+        readings.temperature > thresholds.temperature.max) {
+      alerts.push({
+        type: 'Temperature',
+        message: `Temperature out of range: ${readings.temperature}°C`,
+        severity: 'Medium',
+        value: readings.temperature
+      });
+    }
+  }
+  
+  // Check pH
+  if (readings.pH !== undefined) {
+    if (readings.pH < thresholds.pH.min || readings.pH > thresholds.pH.max) {
+      alerts.push({
+        type: 'pH',
+        message: `pH out of range: ${readings.pH}`,
+        severity: 'Medium',
+        value: readings.pH
+      });
+    }
+  }
+  
+  return alerts;
+};
+
+// Static methods
+sensorSchema.statics.getActiveSensors = function() {
+  return this.find({ status: 'Active' });
+};
+
+sensorSchema.statics.getSensorsByLocation = function(section) {
+  return this.find({ 'location.section': section, status: 'Active' });
+};
+
+// Indexes
+sensorSchema.index({ 'location.section': 1, status: 1 });
+sensorSchema.index({ type: 1, status: 1 });
+sensorReadingSchema.index({ sensorId: 1, timestamp: -1 });
+sensorReadingSchema.index({ timestamp: -1 });
+weatherSchema.index({ timestamp: -1 });
+
+const Sensor = mongoose.model('Sensor', sensorSchema);
+const SensorReading = mongoose.model('SensorReading', sensorReadingSchema);
+const Weather = mongoose.model('Weather', weatherSchema);
+
+module.exports = { Sensor, SensorReading, Weather };
+
+====================================================================
+==== FILE: backend/routes/crops.js ====
+====================================================================
+
+const express = require('express');
+const router = express.Router();
+const Crop = require('../models/Crop');
+const { IrrigationRecommendation } = require('../models/Irrigation');
+const { generateIrrigationRecommendation } = require('../services/irrigationService');
+
+// GET /api/crops - Get all crops
+router.get('/', async (req, res) => {
+  try {
+    const { stage, waterNeeds, section, sortBy = 'createdAt', sortOrder = 'desc' } = req.query;
+    
+    let query = { isActive: true };
+    
+    // Apply filters
+    if (stage) query.stage = stage;
+    if (waterNeeds) query.waterNeeds = waterNeeds;
+    if (section) query['location.section'] = section;
+    
+    const sortOptions = {};
+    sortOptions[sortBy] = sortOrder === 'asc' ? 1 : -1;
+    
+    const crops = await Crop.find(query).sort(sortOptions);
+    
+    res.json({
+      success: true,
+      count: crops.length,
+      data: crops
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching crops',
+      error: error.message
+    });
+  }
+});
+
+// GET /api/crops/:id - Get single crop
+router.get('/:id', async (req, res) => {
+  try {
+    const crop = await Crop.findById(req.params.id);
+    
+    if (!crop) {
+      return res.status(404).json({
+        success: false,
+        message: 'Crop not found'
+      });
+    }
+    
+    res.json({
+      success: true,
+      data: crop
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching crop',
+      error: error.message
+    });
+  }
+});
+
+// POST /api/crops - Create new crop
+router.post('/', async (req, res) => {
+  try {
+    const cropData = req.body;
+    
+    // Set water requirements based on crop type and water needs
+    const waterRequirements = {
+      'Low': { dailyAmount: 0.5, frequency: 5 },
+      'Medium': { dailyAmount: 1.5, frequency: 3 },
+      'Medium-High': { dailyAmount: 2.5, frequency: 2 },
+      'High': { dailyAmount: 4, frequency: 1 }
+    };
+    
+    cropData.waterRequirement = waterRequirements[cropData.waterNeeds] || waterRequirements['Medium'];
+    
+    const crop = new Crop(cropData);
+    
+    // Calculate initial next watering date
+    crop.calculateNextWatering();
+    
+    await crop.save();
+    
+    // Generate initial irrigation recommendation
+    await generateIrrigationRecommendation(crop._id);
+    
+    res.status(201).json({
+      success: true,
+      message: 'Crop created successfully',
+      data: crop
+    });
+  } catch (error) {
+    res.status(400).json({
+      success: false,
+      message: 'Error creating crop',
+      error: error.message
+    });
+  }
+});
+
+// PUT /api/crops/:id - Update crop
+router.put('/:id', async (req, res) => {
+  try {
+    const crop = await Crop.findById(req.params.id);
+    
+    if (!crop) {
+      return res.status(404).json({
+        success: false,
+        message: 'Crop not found'
+      });
+    }
+    
+    // Update crop fields
+    Object.keys(req.body).forEach(key => {
+      if (req.body[key] !== undefined) {
+        crop[key] = req.body[key];
+      }
+    });
+    
+    // Recalculate watering if water needs changed
+    if (req.body.waterNeeds) {
+      const waterRequirements = {
+        'Low': { dailyAmount: 0.5, frequency: 5 },
+        'Medium': { dailyAmount: 1.5, frequency: 3 },
+        'Medium-High': { dailyAmount: 2.5, frequency: 2 },
+        'High': { dailyAmount: 4, frequency: 1 }
+      };
+      crop.waterRequirement = waterRequirements[req.body.waterNeeds];
+      crop.calculateNextWatering();
+    }
+    
+    await crop.save();
+    
+    res.json({
+      success: true,
+      message: 'Crop updated successfully',
+      data: crop
+    });
+  } catch (error) {
+    res.status(400).json({
+      success: false,
+      message: 'Error updating crop',
+      error: error.message
+    });
+  }
+});
+
+// DELETE /api/crops/:id - Delete crop (soft delete)
+router.delete('/:id', async (req, res) => {
+  try {
+    const crop = await Crop.findById(req.params.id);
+    
+    if (!crop) {
+      return res.status(404).json({
+        success: false,
+        message: 'Crop not found'
+      });
+    }
+    
+    crop.isActive = false;
+    await crop.save();
+    
+    res.json({
+      success: true,
+      message: 'Crop deleted successfully'
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error deleting crop',
+      error: error.message
+    });
+  }
+});
+
+// POST /api/crops/:id/water - Water a crop
+router.post('/:id/water', async (req, res) => {
+  try {
+    const { amount, method = 'Manual', duration = 0, notes = '' } = req.body;
+    
+    const crop = await Crop.findById(req.params.id);
+    
+    if (!crop) {
+      return res.status(404).json({
+        success: false,
+        message: 'Crop not found'
+      });
+    }
+    
+    await crop.waterCrop(amount, method, duration, notes);
+    
+    // Generate new irrigation recommendation after watering
+    await generateIrrigationRecommendation(crop._id);
+    
+    res.json({
+      success: true,
+      message: 'Crop watered successfully',
+      data: crop
+    });
+  } catch (error) {
+    res.status(400).json({
+      success: false,
+      message: 'Error watering crop',
+      error: error.message
+    });
+  }
+});
+
+// POST /api/crops/:id/stage - Update crop stage
+router.post('/:id/stage', async (req, res) => {
+  try {
+    const { stage, notes } = req.body;
+    
+    const crop = await Crop.findById(req.params.id);
+    
+    if (!crop) {
+      return res.status(404).json({
+        success: false,
+        message: 'Crop not found'
+      });
+    }
+    
+    await crop.updateStage(stage, notes);
+    
+    // Generate new irrigation recommendation after stage change
+    await generateIrrigationRecommendation(crop._id);
+    
+    res.json({
+      success: true,
+      message: 'Crop stage updated successfully',
+      data: crop
+    });
+  } catch (error) {
+    res.status(400).json({
+      success: false,
+      message: 'Error updating crop stage',
+      error: error.message
+    });
+  }
+});
+
+// GET /api/crops/:id/history - Get crop irrigation history
+router.get('/:id/history', async (req, res) => {
+  try {
+    const { limit = 50, offset = 0 } = req.query;
+    
+    const crop = await Crop.findById(req.params.id);
+    
+    if (!crop) {
+      return res.status(404).json({
+        success: false,
+        message: 'Crop not found'
+      });
+    }
+    
+    const history = crop.irrigationHistory
+      .sort((a, b) => new Date(b.date) - new Date(a.date))
+      .slice(offset, offset + parseInt(limit));
+    
+    res.json({
+      success: true,
+      data: {
+        history,
+        total: crop.irrigationHistory.length
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching irrigation history',
+      error: error.message
+    });
+  }
+});
+
+// GET /api/crops/needing-water - Get crops that need watering
+router.get('/status/needing-water', async (req, res) => {
+  try {
+    const { days = 1 } = req.query;
+    
+    const crops = await Crop.getCropsNeedingWater(parseInt(days));
+    
+    res.json({
+      success: true,
+      count: crops.length,
+      data: crops
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching crops needing water',
+      error: error.message
+    });
+  }
+});
+
+// GET /api/crops/by-stage/:stage - Get crops by stage
+router.get('/stage/:stage', async (req, res) => {
+  try {
+    const crops = await Crop.getCropsByStage(req.params.stage);
+    
+    res.json({
+      success: true,
+      count: crops.length,
+      data: crops
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching crops by stage',
+      error: error.message
+    });
+  }
+});
+
+// GET /api/crops/:id/recommendations - Get irrigation recommendations for crop
+router.get('/:id/recommendations', async (req, res) => {
+  try {
+    const recommendations = await IrrigationRecommendation.getRecommendationsByCrop(req.params.id);
+    
+    res.json({
+      success: true,
+      count: recommendations.length,
+      data: recommendations
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching recommendations',
+      error: error.message
+    });
+  }
+});
+
+module.exports = router;
+
+====================================================================
+==== FILE: backend/routes/irrigation.js ====
+====================================================================
+
+const express = require('express');
+const router = express.Router();
+const { IrrigationRecommendation, IrrigationSchedule, IrrigationSystem } = require('../models/Irrigation');
+const Crop = require('../models/Crop');
+const { generateIrrigationRecommendation, updateIrrigationRecommendations } = require('../services/irrigationService');
+
+// GET /api/irrigation/recommendations - Get all irrigation recommendations
+router.get('/recommendations', async (req, res) => {
+  try {
+    const { status, priority, cropId, limit = 50, offset = 0 } = req.query;
+    
+    let query = {};
+    if (status) query.status = status;
+    if (priority) query['recommendation.priority'] = priority;
+    if (cropId) query.cropId = cropId;
+    
+    const recommendations = await IrrigationRecommendation.find(query)
+      .populate('cropId', 'name stage waterNeeds location')
+      .sort({ createdAt: -1 })
+      .limit(parseInt(limit))
+      .skip(parseInt(offset));
+    
+    const total = await IrrigationRecommendation.countDocuments(query);
+    
+    res.json({
+      success: true,
+      count: recommendations.length,
+      total,
+      data: recommendations
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching irrigation recommendations',
+      error: error.message
+    });
+  }
+});
+
+// GET /api/irrigation/recommendations/pending - Get pending recommendations
+router.get('/recommendations/pending', async (req, res) => {
+  try {
+    const recommendations = await IrrigationRecommendation.getPendingRecommendations();
+    
+    res.json({
+      success: true,
+      count: recommendations.length,
+      data: recommendations
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching pending recommendations',
+      error: error.message
+    });
+  }
+});
+
+// POST /api/irrigation/recommendations/:id/approve - Approve recommendation
+router.post('/recommendations/:id/approve', async (req, res) => {
+  try {
+    const { notes = '' } = req.body;
+    
+    const recommendation = await IrrigationRecommendation.findById(req.params.id);
+    
+    if (!recommendation) {
+      return res.status(404).json({
+        success: false,
+        message: 'Recommendation not found'
+      });
+    }
+    
+    await recommendation.approve(notes);
+    
+    // Create irrigation schedule if approved
+    const schedule = new IrrigationSchedule({
+      cropId: recommendation.cropId,
+      scheduledDate: recommendation.scheduledDate || new Date(),
+      waterAmount: recommendation.recommendation.waterAmount,
+      duration: recommendation.recommendation.duration,
+      method: recommendation.recommendation.method,
+      autoExecute: true
+    });
+    
+    await schedule.save();
+    
+    res.json({
+      success: true,
+      message: 'Recommendation approved and scheduled',
+      data: {
+        recommendation,
+        schedule
+      }
+    });
+  } catch (error) {
+    res.status(400).json({
+      success: false,
+      message: 'Error approving recommendation',
+      error: error.message
+    });
+  }
+});
+
+// POST /api/irrigation/recommendations/:id/reject - Reject recommendation
+router.post('/recommendations/:id/reject', async (req, res) => {
+  try {
+    const { reason = '' } = req.body;
+    
+    const recommendation = await IrrigationRecommendation.findById(req.params.id);
+    
+    if (!recommendation) {
+      return res.status(404).json({
+        success: false,
+        message: 'Recommendation not found'
+      });
+    }
+    
+    await recommendation.reject(reason);
+    
+    res.json({
+      success: true,
+      message: 'Recommendation rejected',
+      data: recommendation
+    });
+  } catch (error) {
+    res.status(400).json({
+      success: false,
+      message: 'Error rejecting recommendation',
+      error: error.message
+    });
+  }
+});
+
+// POST /api/irrigation/recommendations/refresh - Refresh all recommendations
+router.post('/recommendations/refresh', async (req, res) => {
+  try {
+    await updateIrrigationRecommendations();
+    
+    const recommendations = await IrrigationRecommendation.getPendingRecommendations();
+    
+    res.json({
+      success: true,
+      message: 'Recommendations refreshed successfully',
+      count: recommendations.length,
+      data: recommendations
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error refreshing recommendations',
+      error: error.message
+    });
+  }
+});
+
+// GET /api/irrigation/schedule - Get irrigation schedules
+router.get('/schedule', async (req, res) => {
+  try {
+    const { status, date, cropId, limit = 50, offset = 0 } = req.query;
+    
+    let query = {};
+    if (status) query.status = status;
+    if (cropId) query.cropId = cropId;
+    if (date) {
+      const targetDate = new Date(date);
+      const startOfDay = new Date(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate());
+      const endOfDay = new Date(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate() + 1);
+      query.scheduledDate = { $gte: startOfDay, $lt: endOfDay };
+    }
+    
+    const schedules = await IrrigationSchedule.find(query)
+      .populate('cropId', 'name location')
+      .sort({ scheduledDate: 1 })
+      .limit(parseInt(limit))
+      .skip(parseInt(offset));
+    
+    const total = await IrrigationSchedule.countDocuments(query);
+    
+    res.json({
+      success: true,
+      count: schedules.length,
+      total,
+      data: schedules
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching irrigation schedules',
+      error: error.message
+    });
+  }
+});
+
+// GET /api/irrigation/schedule/today - Get today's irrigation schedule
+router.get('/schedule/today', async (req, res) => {
+  try {
+    const schedules = await IrrigationSchedule.getTodaysSchedule();
+    
+    res.json({
+      success: true,
+      count: schedules.length,
+      data: schedules
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching today\'s schedule',
+      error: error.message
+    });
+  }
+});
+
+// GET /api/irrigation/schedule/upcoming - Get upcoming irrigation schedule
+router.get('/schedule/upcoming', async (req, res) => {
+  try {
+    const { days = 7 } = req.query;
+    
+    const schedules = await IrrigationSchedule.getUpcomingSchedule(parseInt(days));
+    
+    res.json({
+      success: true,
+      count: schedules.length,
+      data: schedules
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching upcoming schedule',
+      error: error.message
+    });
+  }
+});
+
+// POST /api/irrigation/schedule - Create new irrigation schedule
+router.post('/schedule', async (req, res) => {
+  try {
+    const scheduleData = req.body;
+    
+    const schedule = new IrrigationSchedule(scheduleData);
+    await schedule.save();
+    
+    res.status(201).json({
+      success: true,
+      message: 'Irrigation schedule created successfully',
+      data: schedule
+    });
+  } catch (error) {
+    res.status(400).json({
+      success: false,
+      message: 'Error creating irrigation schedule',
+      error: error.message
+    });
+  }
+});
+
+// POST /api/irrigation/schedule/:id/execute - Execute irrigation schedule
+router.post('/schedule/:id/execute', async (req, res) => {
+  try {
+    const schedule = await IrrigationSchedule.findById(req.params.id);
+    
+    if (!schedule) {
+      return res.status(404).json({
+        success: false,
+        message: 'Schedule not found'
+      });
+    }
+    
+    if (schedule.status !== 'Scheduled') {
+      return res.status(400).json({
+        success: false,
+        message: 'Schedule cannot be executed in current status'
+      });
+    }
+    
+    await schedule.execute();
+    
+    res.json({
+      success: true,
+      message: 'Irrigation executed successfully',
+      data: schedule
+    });
+  } catch (error) {
+    res.status(400).json({
+      success: false,
+      message: 'Error executing irrigation',
+      error: error.message
+    });
+  }
+});
+
+// POST /api/irrigation/schedule/:id/cancel - Cancel irrigation schedule
+router.post('/schedule/:id/cancel', async (req, res) => {
+  try {
+    const { reason = '' } = req.body;
+    
+    const schedule = await IrrigationSchedule.findById(req.params.id);
+    
+    if (!schedule) {
+      return res.status(404).json({
+        success: false,
+        message: 'Schedule not found'
+      });
+    }
+    
+    await schedule.cancel(reason);
+    
+    res.json({
+      success: true,
+      message: 'Schedule cancelled successfully',
+      data: schedule
+    });
+  } catch (error) {
+    res.status(400).json({
+      success: false,
+      message: 'Error cancelling schedule',
+      error: error.message
+    });
+  }
+});
+
+// GET /api/irrigation/systems - Get irrigation systems
+router.get('/systems', async (req, res) => {
+  try {
+    const { status, type, section } = req.query;
+    
+    let query = {};
+    if (status) query.status = status;
+    if (type) query.type = type;
+    if (section) query['location.section'] = section;
+    
+    const systems = await IrrigationSystem.find(query)
+      .populate('connectedCrops', 'name location');
+    
+    res.json({
+      success: true,
+      count: systems.length,
+      data: systems
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching irrigation systems',
+      error: error.message
+    });
+  }
+});
+
+// POST /api/irrigation/systems - Create new irrigation system
+router.post('/systems', async (req, res) => {
+  try {
+    const system = new IrrigationSystem(req.body);
+    await system.save();
+    
+    res.status(201).json({
+      success: true,
+      message: 'Irrigation system created successfully',
+      data: system
+    });
+  } catch (error) {
+    res.status(400).json({
+      success: false,
+      message: 'Error creating irrigation system',
+      error: error.message
+    });
+  }
+});
+
+// PUT /api/irrigation/systems/:id - Update irrigation system
+router.put('/systems/:id', async (req, res) => {
+  try {
+    const system = await IrrigationSystem.findByIdAndUpdate(
+      req.params.id,
+      req.body,
+      { new: true, runValidators: true }
+    );
+    
+    if (!system) {
+      return res.status(404).json({
+        success: false,
+        message: 'Irrigation system not found'
+      });
+    }
+    
+    res.json({
+      success: true,
+      message: 'Irrigation system updated successfully',
+      data: system
+    });
+  } catch (error) {
+    res.status(400).json({
+      success: false,
+      message: 'Error updating irrigation system',
+      error: error.message
+    });
+  }
+});
+
+// GET /api/irrigation/dashboard - Get irrigation dashboard data
+router.get('/dashboard', async (req, res) => {
+  try {
+    // Get pending recommendations
+    const pendingRecommendations = await IrrigationRecommendation.getPendingRecommendations();
+    
+    // Get today's schedule
+    const todaySchedule = await IrrigationSchedule.getTodaysSchedule();
+    
+    // Get upcoming schedule
+    const upcomingSchedule = await IrrigationSchedule.getUpcomingSchedule(7);
+    
+    // Get crops needing water
+    const cropsNeedingWater = await Crop.getCropsNeedingWater(1);
+    
+    // Get system status
+    const activeSystems = await IrrigationSystem.find({ status: 'Active' });
+    
+    res.json({
+      success: true,
+      data: {
+        pendingRecommendations: pendingRecommendations.slice(0, 5),
+        todaySchedule: todaySchedule.slice(0, 10),
+        upcomingSchedule: upcomingSchedule.slice(0, 10),
+        cropsNeedingWater: cropsNeedingWater.slice(0, 5),
+        systemsStatus: {
+          active: activeSystems.length,
+          total: await IrrigationSystem.countDocuments()
+        },
+        summary: {
+          pendingCount: pendingRecommendations.length,
+          todayCount: todaySchedule.length,
+          upcomingCount: upcomingSchedule.length,
+          urgentCount: cropsNeedingWater.length
+        }
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching dashboard data',
+      error: error.message
+    });
+  }
+});
+
+module.exports = router;
+
+====================================================================
+==== FILE: backend/routes/sensors.js ====
+====================================================================
+
+const express = require('express');
+const router = express.Router();
+const { Sensor, SensorReading } = require('../models/Sensor');
+
+// GET /api/sensors - Get all sensors
+router.get('/', async (req, res) => {
+  try {
+    const { status, type, section } = req.query;
+    let query = {};
+    if (status) query.status = status;
+    if (type) query.type = type;
+    if (section) query['location.section'] = section;
+
+    const sensors = await Sensor.find(query);
+    res.json({ success: true, count: sensors.length, data: sensors });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Error fetching sensors', error: error.message });
+  }
+});
+
+// GET /api/sensors/:id - Get a single sensor
+router.get('/:id', async (req, res) => {
+  try {
+    const sensor = await Sensor.findById(req.params.id);
+    if (!sensor) {
+      return res.status(404).json({ success: false, message: 'Sensor not found' });
+    }
+    res.json({ success: true, data: sensor });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Error fetching sensor', error: error.message });
+  }
+});
+
+// POST /api/sensors - Create a new sensor
+router.post('/', async (req, res) => {
+  try {
+    const sensor = new Sensor(req.body);
+    await sensor.save();
+    res.status(201).json({ success: true, message: 'Sensor created successfully', data: sensor });
+  } catch (error) {
+    res.status(400).json({ success: false, message: 'Error creating sensor', error: error.message });
+  }
+});
+
+// PUT /api/sensors/:id - Update a sensor
+router.put('/:id', async (req, res) => {
+  try {
+    const sensor = await Sensor.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true });
+    if (!sensor) {
+      return res.status(404).json({ success: false, message: 'Sensor not found' });
+    }
+    res.json({ success: true, message: 'Sensor updated successfully', data: sensor });
+  } catch (error) {
+    res.status(400).json({ success: false, message: 'Error updating sensor', error: error.message });
+  }
+});
+
+// GET /api/sensors/:id/readings - Get sensor readings for a specific sensor
+router.get('/:id/readings', async (req, res) => {
+  try {
+    const { limit = 100, sort = 'desc' } = req.query;
+    const sensor = await Sensor.findById(req.params.id);
+    if (!sensor) {
+        return res.status(404).json({ success: false, message: 'Sensor not found' });
+    }
+
+    const readings = await SensorReading.find({ sensorId: req.params.id })
+        .sort({ timestamp: sort === 'asc' ? 1 : -1 })
+        .limit(parseInt(limit));
+        
+    res.json({ success: true, count: readings.length, data: readings });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Error fetching sensor readings', error: error.message });
+  }
+});
+
+const { generateSensorData } = require('../services/sensorService');
+
+router.post('/generate-test-data', async (req, res) => {
+    try {
+        console.log('Manual trigger for generateSensorData received.');
+        await generateSensorData();
+        res.status(200).json({ 
+            success: true, 
+            message: 'Sensor data generation task completed successfully.' 
+        });
+    } catch (error) {
+        console.error('Error during manual data generation trigger:', error);
+        res.status(500).json({ 
+            success: false, 
+            message: 'Failed to generate sensor data.',
+            error: error.message
+        });
+    }
+});
+
+module.exports = router;
+
+====================================================================
+==== FILE: backend/routes/weather.js ====
+====================================================================
+
+const express = require('express');
+const router = express.Router();
+const { getWeatherData } = require('../services/weatherService');
+
+// GET /api/weather/bangalore - Get the latest weather for Bangalore
+router.get('/bangalore', async (req, res, next) => {
+    try {
+        const weatherData = await getWeatherData(); // Uses default Bangalore coordinates
+        res.json({ success: true, data: weatherData });
+    } catch (error) {
+        // Pass the error to the global error handler
+        next(error);
+    }
+});
+
+// GET /api/weather/by-coords?lat=...&lon=... - Get weather for specific coordinates
+router.get('/by-coords', async (req, res, next) => {
+    try {
+        const { lat, lon } = req.query;
+        if (!lat || !lon) {
+            return res.status(400).json({ success: false, message: 'Latitude (lat) and Longitude (lon) are required query parameters.' });
+        }
+        const weatherData = await getWeatherData(parseFloat(lat), parseFloat(lon));
+        res.json({ success: true, data: weatherData });
+    } catch (error) {
+        next(error);
+    }
+});
+
+module.exports = router;
+
+====================================================================
+==== FILE: backend/services/irrigationService.js ====
+====================================================================
+
+const Crop = require('../models/Crop');
+const { IrrigationRecommendation } = require('../models/Irrigation');
+const { Sensor, SensorReading, Weather } = require('../models/Sensor');
+
+/**
+ * Generates or updates an irrigation recommendation for a single crop.
+ * @param {string} cropId - The ID of the crop to generate a recommendation for.
+ */
+const generateIrrigationRecommendation = async (cropId) => {
+  try {
+    const crop = await Crop.findById(cropId);
+    if (!crop || !crop.isActive) {
+      // If crop not found or inactive, do nothing.
+      return null;
+    }
+
+    // --- Gather Data ---
+    // 1. Get latest sensor reading near the crop
+    const sensor = await Sensor.findOne({ 'location.section': crop.location.section, type: 'SoilMoisture', status: 'Active' });
+    const latestReading = sensor ? await SensorReading.findOne({ sensorId: sensor._id }).sort({ timestamp: -1 }) : null;
+    const soilMoisture = latestReading ? latestReading.readings.soilMoisture : 50; // Default if no sensor
+
+    // 2. Get latest weather forecast
+    const weather = await Weather.findOne().sort({ timestamp: -1 });
+    const rainProbability = weather?.forecast[0]?.precipitation?.probability || 0;
+
+    // --- Decision Logic ---
+    let recommendation = {};
+    let confidence = 75; // Base confidence
+    const daysUntilWatering = crop.daysUntilWatering;
+
+    if (daysUntilWatering <= 0) {
+      recommendation = { action: 'Water today', priority: 'Critical' };
+      confidence = 95;
+    } else if (daysUntilWatering === 1) {
+      recommendation = { action: 'Water tomorrow', priority: 'High' };
+      confidence = 90;
+    } else if (daysUntilWatering === 2) {
+      recommendation = { action: 'Water in 2 days', priority: 'Medium' };
+    } else {
+      recommendation = { action: 'No watering needed', priority: 'Low' };
+    }
+
+    // Adjust based on soil moisture
+    if (soilMoisture < 25 && recommendation.priority !== 'Critical') {
+        recommendation.priority = 'High';
+        recommendation.action = 'Water tomorrow';
+        confidence = Math.min(100, confidence + 15);
+    }
+    
+    // Adjust based on weather forecast (e.g., if high chance of rain, postpone)
+    if (rainProbability > 60 && ['High', 'Medium'].includes(recommendation.priority)) {
+        recommendation.action = 'No watering needed';
+        recommendation.priority = 'Low';
+        confidence = 85;
+    }
+
+    // Finalize recommendation details
+    recommendation.waterAmount = crop.waterRequirement.dailyAmount;
+    recommendation.duration = crop.waterRequirement.dailyAmount * 5; // Example: 5 mins per liter
+    recommendation.method = 'Drip';
+
+    const recommendationData = {
+      cropId: crop._id,
+      recommendation,
+      factors: {
+        soilMoisture,
+        weatherForecast: `Rain probability: ${rainProbability}%`,
+        cropStage: crop.stage,
+        lastWatered: crop.lastWatered,
+      },
+      confidence: Math.round(confidence),
+      scheduledDate: crop.nextWatering,
+      status: 'Pending'
+    };
+    
+    // Use findOneAndUpdate with upsert to create or update the pending recommendation for this crop
+    const result = await IrrigationRecommendation.findOneAndUpdate(
+        { cropId: crop._id, status: 'Pending' }, // Find existing pending recommendation
+        recommendationData, // The new data
+        { new: true, upsert: true, runValidators: true } // Options: return new doc, create if not found
+    );
+    
+    console.log(`Generated recommendation for crop ${crop.name}: ${result.recommendation.action}`);
+    return result;
+
+  } catch (error) {
+    console.error(`Error generating recommendation for crop ${cropId}:`, error);
+  }
+};
+
+/**
+ * Iterates through all active crops and updates their irrigation recommendations.
+ * This is used by a cron job.
+ */
+const updateIrrigationRecommendations = async () => {
+  try {
+    const activeCrops = await Crop.find({ isActive: true });
+    console.log(`Updating recommendations for ${activeCrops.length} active crops.`);
+
+    for (const crop of activeCrops) {
+      await generateIrrigationRecommendation(crop._id);
+    }
+    
+    console.log('Finished updating all irrigation recommendations.');
+  } catch (error) {
+    console.error('Error in updateIrrigationRecommendations service:', error);
+  }
+};
+
+module.exports = {
+  generateIrrigationRecommendation,
+  updateIrrigationRecommendations
+};
+
+====================================================================
+==== FILE: backend/services/sensorService.js ====
+====================================================================
+
+const { Sensor, SensorReading } = require('../models/Sensor');
+
+/**
+ * Generates a random number within a given range.
+ * @param {number} min - The minimum value.
+ * @param {number} max - The maximum value.
+ * @returns {number} A random number.
+ */
+const getRandom = (min, max, decimals = 2) => {
+  return parseFloat((Math.random() * (max - min) + min).toFixed(decimals));
+};
+
+/**
+ * Generates simulated sensor data for all active sensors.
+ * This is used by a cron job for demo purposes.
+ */
+const generateSensorData = async () => {
+  console.log('Generating new sensor data...');
+  try {
+    const activeSensors = await Sensor.find({ status: 'Active' });
+
+    if (activeSensors.length === 0) {
+      console.log('No active sensors found to generate data for.');
+      return;
+    }
+
+    const readingPromises = activeSensors.map(sensor => {
+      const readings = {
+        soilMoisture: getRandom(15, 85),
+        temperature: getRandom(18, 32),
+        humidity: getRandom(40, 90),
+        pH: getRandom(6.0, 7.5)
+      };
+      
+      const newReading = new SensorReading({
+        sensorId: sensor._id,
+        readings: readings
+      });
+
+      // Update the sensor's last reading time
+      sensor.lastReading = new Date();
+      sensor.batteryLevel = Math.max(0, sensor.batteryLevel - getRandom(0.01, 0.05)); // Simulate battery drain
+
+      return Promise.all([newReading.save(), sensor.save()]);
+    });
+
+    await Promise.all(readingPromises);
+    console.log(`Generated and saved new readings for ${activeSensors.length} sensors.`);
+  } catch (error) {
+    console.error('Error in generateSensorData service:', error);
+  }
+};
+
+module.exports = {
+  generateSensorData
+};
+
+====================================================================
+==== FILE: backend/services/irrigationAIService.js ====
+====================================================================
+
+// backend/services/irrigationAIService.js (REVERTED to simpler, stable version)
+
+const axios = require('axios');
+const Crop = require('../models/Crop');
+const { getWeatherData } = require('./weatherService');
+
+const ML_SERVICE_URL = 'http://127.0.0.1:5002/predict';
+const NORMALIZATION_RANGES = {
+    Soil_Moisture: { min: 10, max: 95 }, Temperature: { min: 10, max: 40 },
+    Humidity: { min: 20, max: 95 }, Rainfall: { min: 0, max: 15 },
+    crop_age: { min: 5, max: 100 }, crop_stage: { min: 0.25, max: 1.0 },
+    water_needs: { min: 0.2, max: 0.9 },
+};
+const STAGE_MAP = {'Seedling': 0.25, 'Growing': 0.5, 'Mature': 0.75, 'Harvesting': 1.0};
+const NEEDS_MAP = {'Low': 0.2, 'Medium': 0.5, 'Medium-High': 0.7, 'High': 0.9};
+
+const normalize = (value, featureName) => {
+    if (value == null || isNaN(value)) return 0;
+    const range = NORMALIZATION_RANGES[featureName];
+    if (!range) return 0;
+    const result = (value - range.min) / (range.max - range.min);
+    return Math.max(0, Math.min(1, result));
+};
+
+const generateAISchedule = async (cropId) => {
+    const crop = await Crop.findById(cropId);
+    if (!crop) throw new Error('Crop not found');
+
+    const weatherData = await getWeatherData(
+        crop.location.coordinates?.latitude,
+        crop.location.coordinates?.longitude
+    );
+
+    const imageData = [];
+    const cropWaterNeeds = NEEDS_MAP[crop.waterNeeds] || 0.5;
+    const cropStage = STAGE_MAP[crop.stage] || 0.5;
+
+    for (let i = 0; i < 14; i++) {
+        const forecastDay = weatherData.daily[Math.min(i, weatherData.daily.length - 1)];
+        const dayTemp = forecastDay?.temperature?.max || 25;
+
+        // Using simpler, more predictable placeholders for the input tensor
+        const dailyValues = [
+            normalize(40, 'Soil_Moisture'), // Placeholder for slightly dry soil
+            normalize(dayTemp, 'Temperature'),
+            normalize(60, 'Humidity'),      // Placeholder for average humidity
+            normalize(0, 'Rainfall'),
+            normalize(crop.daysSincePlanted + i, 'crop_age'),
+            normalize(cropStage, 'crop_stage'),
+            normalize(cropWaterNeeds, 'water_needs')
+        ];
+        imageData.push(dailyValues);
+    }
+
+    try {
+        const response = await axios.post(ML_SERVICE_URL, { image_data: imageData });
+        if (response.data && response.data.success) {
+            const { schedule, quantity } = response.data.prediction;
+            const newSchedule = { schedule, quantity, generatedAt: new Date() };
+            crop.aiSchedule = newSchedule;
+            await crop.save();
+            return newSchedule;
+        } else {
+            throw new Error(response.data.error || 'ML service returned non-success.');
+        }
+    } catch (error) {
+        const errorMessage = error.response ? JSON.stringify(error.response.data) : error.message;
+        throw new Error(`AI prediction service failed: ${errorMessage}`);
+    }
+};
+
+module.exports = { generateAISchedule };
+
+====================================================================
+==== FILE: src/pages/Crops.tsx ====
+====================================================================
+
+// src/pages/Crops.tsx
+
+import React, { useState, useEffect, useMemo } from "react"; // Added useMemo
+import Navbar from "@/components/navigation/Navbar";
+import Sidebar from "@/components/navigation/Sidebar";
+import { Card, CardContent } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Droplet, Calendar, CircleChevronUp, CircleChevronDown, Sprout, LoaderCircle, AlertTriangle, Sparkles } from "lucide-react";
+import { AddNewCropDialog } from "@/components/crops/AddNewCropDialog";
+import { IrrigationCalendar } from "@/components/crops/IrrigationCalendar";
+
+// --- TypeScript Type Definitions ---
+type AISchedule = {
+  schedule: number[];
+  quantity: number[];
+};
+
+type CropType = {
+  _id: string;
+  name: string;
+  stage: 'Seedling' | 'Growing' | 'Mature' | 'Harvesting';
+  waterNeeds: 'Low' | 'Medium' | 'Medium-High' | 'High';
+  plantedDate: string;
+  nextWatering: string;
+  aiSchedule?: AISchedule;
+};
+
+// ===================================================================
+// The Enhanced CropCard Component
+// ===================================================================
+const CropCard = ({ crop }: { crop: CropType }) => {
+  const [isExpanded, setIsExpanded] = React.useState(false);
+
+  // --- State Management for AI Feature ---
+  const [originalSchedule, setOriginalSchedule] = useState<AISchedule | null>(crop.aiSchedule || null);
+  const [isLoadingSchedule, setIsLoadingSchedule] = useState<boolean>(false);
+  const [scheduleError, setScheduleError] = useState<string | null>(null);
+
+  // ===================================================================
+  // --- NEW: FUNCTION TO APPLY ZERO-IRRIGATION DAYS (FRONTEND ONLY) ---
+  // ===================================================================
+  const applyZeroIrrigationDays = (
+    scheduleData: AISchedule | null, 
+    waterNeeds: CropType['waterNeeds']
+  ): AISchedule | null => {
+    if (!scheduleData) return null;
+
+    // Clone the original data to avoid modifying the state directly
+    const newSchedule = [...scheduleData.schedule];
+    const newQuantity = [...scheduleData.quantity];
+
+    // 1. Define how many zero-days we want per week for each level
+    const zeroDaysTargetPerWeek = {
+      'Low': 5,
+      'Medium': 4,
+      'Medium-High': 3,
+      'High': 2
+    };
+
+    // Calculate total zero-days needed for the 14-day period
+    const totalZeroDaysNeeded = zeroDaysTargetPerWeek[waterNeeds] * 2;
+
+    // 2. Find all days that currently have watering scheduled
+    const wateringDays = newSchedule
+      .map((s, index) => (s === 1 ? { index, quantity: newQuantity[index] } : null))
+      .filter(Boolean);
+      
+    // If we already have enough or more zero days than needed, do nothing.
+    const currentZeroDays = 14 - wateringDays.length;
+    if (currentZeroDays >= totalZeroDaysNeeded) {
+        return scheduleData;
+    }
+
+    // 3. Sort the watering days by the SMALLEST quantity first
+    wateringDays.sort((a, b) => a!.quantity - b!.quantity);
+
+    // 4. Calculate how many days we need to "turn off"
+    const daysToZeroOut = wateringDays.length - (14 - totalZeroDaysNeeded);
+    
+    // 5. Take the smallest ones and set them to 0
+    if (daysToZeroOut > 0) {
+      const daysToChange = wateringDays.slice(0, daysToZeroOut);
+      for (const day of daysToChange) {
+        newSchedule[day!.index] = 0;
+        newQuantity[day!.index] = 0;
+      }
+    }
+
+    return { schedule: newSchedule, quantity: newQuantity };
+  };
+
+  // --- Use useMemo to prevent re-calculating on every render ---
+  // This derived state will be used for display.
+  const displaySchedule = useMemo(
+    () => applyZeroIrrigationDays(originalSchedule, crop.waterNeeds),
+    [originalSchedule, crop.waterNeeds]
+  );
+  // ===================================================================
+  // --- END OF NEW LOGIC ---
+  // ===================================================================
+
+
+  const handleGenerateSchedule = async () => {
+    setIsLoadingSchedule(true);
+    setScheduleError(null);
+    try {
+      const response = await fetch(`/api/ai/schedule/${crop._id}`, { method: 'POST' });
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        throw new Error(data.message || "Failed to generate schedule.");
+      }
+      // Set the RAW, unmodified schedule from the backend
+      setOriginalSchedule(data.data); 
+    } catch (err: any) {
+      setScheduleError(err.message);
+    } finally {
+      setIsLoadingSchedule(false);
+    }
+  };
+
+  const formatDate = (dateString: string) => new Date(dateString).toLocaleDateString("en-US", { year: 'numeric', month: 'long', day: 'numeric' });
+  
+  const getWaterNeedsColor = (needs: string) => {
+    // ... (this function remains the same)
+    switch(needs) {
+      case "Low": return "bg-green-100 text-green-800";
+      case "Medium": return "bg-blue-100 text-blue-800";
+      case "Medium-High": return "bg-indigo-100 text-indigo-800";
+      case "High": return "bg-purple-100 text-purple-800";
+      default: return "bg-gray-100 text-gray-800";
+    }
+  };
+  const getStageColor = (stage: string) => {
+    // ... (this function remains the same)
+    switch(stage) {
+      case "Seedling": return "bg-green-100 text-green-800";
+      case "Growing": return "bg-blue-100 text-blue-800";
+      case "Mature": return "bg-amber-100 text-amber-800";
+      case "Harvesting": return "bg-purple-100 text-purple-800";
+      default: return "bg-gray-100 text-gray-800";
+    }
+  };
+
+  return (
+    <Card className="overflow-hidden shadow-md transition-all duration-300">
+      <div className="p-4 flex items-center justify-between cursor-pointer" onClick={() => setIsExpanded(!isExpanded)}>
+        {/* ... (this part of the component remains the same) ... */}
+         <div className="flex items-center">
+          <div className="mr-4 w-12 h-12 rounded-full bg-irrigation-green flex items-center justify-center text-white text-xl font-bold">
+            {crop.name.charAt(0)}
+          </div>
+          <div>
+            <h3 className="font-semibold text-lg">{crop.name}</h3>
+            <div className="flex gap-2 mt-1">
+              <span className={`text-xs px-2 py-1 rounded-full ${getStageColor(crop.stage)}`}>{crop.stage}</span>
+              <span className={`text-xs px-2 py-1 rounded-full ${getWaterNeedsColor(crop.waterNeeds)}`}>{crop.waterNeeds} Water</span>
+            </div>
+          </div>
+        </div>
+        {isExpanded ? <CircleChevronUp className="text-gray-500" /> : <CircleChevronDown className="text-gray-400" />}
+      </div>
+      
+      {isExpanded && (
+        <CardContent className="border-t pt-4 space-y-6">
+          <div>
+              <h4 className="text-sm font-medium text-gray-800 mb-3">Crop Details</h4>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-sm">
+                  <div className="flex items-center gap-2 p-2 bg-gray-50 rounded-lg">
+                      <Sprout className="h-5 w-5 text-green-600 flex-shrink-0" />
+                      <div>
+                          <p className="text-gray-500">Planted On</p>
+                          <p className="font-semibold">{formatDate(crop.plantedDate)}</p>
+                      </div>
+                  </div>
+                  <div className="flex items-center gap-2 p-2 bg-gray-50 rounded-lg">
+                      <Calendar className="h-5 w-5 text-gray-600 flex-shrink-0" />
+                      <div>
+                          <p className="text-gray-500">Next Manual Watering</p>
+                          <p className="font-semibold">{formatDate(crop.nextWatering)}</p>
+                      </div>
+                  </div>
+                  <div className="flex items-center gap-2 p-2 bg-gray-50 rounded-lg">
+                      <Droplet className="h-5 w-5 text-blue-600 flex-shrink-0" />
+                      <div>
+                          <p className="text-gray-500">Water Needs</p>
+                          <p className="font-semibold">{crop.waterNeeds}</p>
+                      </div>
+                  </div>
+              </div>
+          </div>
+          
+          {/* --- AI Schedule Section --- */}
+          <div className="p-4 bg-gray-50 rounded-lg border">
+            {/* --- MODIFIED: Use the `displaySchedule` for rendering --- */}
+            {displaySchedule ? (
+              <IrrigationCalendar schedule={displaySchedule.schedule} quantity={displaySchedule.quantity} />
+            ) : (
+              <div className="text-center py-4">
+                <h3 className="font-semibold text-gray-700">Generate AI Forecast</h3>
+                <p className="text-sm text-gray-500 my-2">Use the Vision Transformer model to predict the optimal 14-day irrigation plan.</p>
+                <Button onClick={handleGenerateSchedule} disabled={isLoadingSchedule}>
+                  {isLoadingSchedule ? (<><LoaderCircle className="mr-2 h-4 w-4 animate-spin" />Generating...</>) : (<><Sparkles className="mr-2 h-4 w-4" />Generate Schedule</>)}
+                </Button>
+              </div>
+            )}
+            {scheduleError && <p className="text-red-500 text-sm mt-2 text-center">Error: {scheduleError}</p>}
+          </div>
+          {displaySchedule && !isLoadingSchedule && (
+            <div className="text-center -mt-4">
+                <Button variant="link" size="sm" onClick={handleGenerateSchedule}>Re-generate Schedule</Button>
+            </div>
+          )}
+        </CardContent>
+      )}
+    </Card>
+  );
+};
+
+// ===================================================================
+// The Main Crops Page Component (No changes needed here)
+// ===================================================================
+const Crops = () => {
+    // ... (The entire `Crops` component remains exactly the same) ...
+    const [crops, setCrops] = useState<CropType[]>([]);
+    const [loading, setLoading] = useState<boolean>(true);
+    const [error, setError] = useState<string | null>(null);
+
+    useEffect(() => {
+        const fetchCrops = async () => {
+        try {
+            const response = await fetch("/api/crops");
+            const data = await response.json();
+            if (data.success) {
+            setCrops(data.data);
+            } else {
+            throw new Error(data.message || "Failed to fetch crops.");
+            }
+        } catch (err: any) {
+            setError(err.message);
+        } finally {
+            setLoading(false);
+        }
+        };
+        fetchCrops();
+    }, []);
+
+    const handleCropAdded = (newCrop: CropType) => {
+        setCrops((prevCrops) => [newCrop, ...prevCrops]);
+    };
+
+    const renderContent = () => {
+        if (loading) return <div className="flex justify-center p-8"><LoaderCircle className="animate-spin h-8 w-8 text-irrigation-green" /></div>;
+        if (error) return <div className="p-4 bg-red-50 text-red-600 rounded-md"><AlertTriangle className="inline mr-2" />Error: {error}</div>;
+        if (crops.length === 0) return <div className="text-center p-8 bg-gray-100 rounded-lg"><p>No crops found. Add one to get started!</p></div>;
+        return (
+        <div className="space-y-6">
+            {crops.map((crop) => <CropCard key={crop._id} crop={crop} />)}
+        </div>
+        );
+    };
+
+    return (
+        <div className="min-h-screen flex flex-col bg-gray-50">
+        <Navbar />
+        <div className="flex flex-1 overflow-hidden">
+            <aside className="w-64 hidden md:block"><Sidebar /></aside>
+            <main className="flex-1 overflow-y-auto p-6">
+            <div className="max-w-7xl mx-auto">
+                <div className="flex items-center justify-between mb-6">
+                <div>
+                    <h1 className="text-3xl font-bold text-gray-800">Crops</h1>
+                    <p className="text-gray-600">Manage your crops and view AI-powered irrigation forecasts.</p>
+                </div>
+                <AddNewCropDialog onCropAdded={handleCropAdded} />
+                </div>
+                {renderContent()}
+            </div>
+            </main>
+        </div>
+        </div>
+    );
+};
+
+export default Crops;
+
+====================================================================
+==== FILE: ml-service/app.py ====
+====================================================================
+
+# ml-service/app.py
+
+import torch
+import timm
+import numpy as np
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+from model_definition import IrrigationViTHead # Import our model's class
+
+# --- Initialization ---
+app = Flask(__name__)
+CORS(app) # Enable Cross-Origin Resource Sharing for all routes
+
+# --- Model Loading ---
+# This section runs only once when the server starts.
+print("--- Loading PyTorch model ---")
+DEVICE = torch.device('cpu') # Production servers typically run on CPU
+MODEL_PATH = 'irrigation_vit_model.pth'
+model = None # Initialize model as None
+
+try:
+    # 1. Re-create the exact model architecture from training
+    model = timm.create_model(
+        'vit_tiny_patch16_224', pretrained=False, in_chans=1,
+        img_size=(14, 7), patch_size=(2, 1), num_classes=0
+    )
+    # Use the corrected way to get in_features and set the head
+    model.head = IrrigationViTHead(in_features=model.embed_dim)
+
+    # 2. Load the learned weights from the .pth file
+    model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
+    
+    # 3. Set the model to evaluation mode (very important!)
+    model.eval()
+    print("--- Model loaded successfully! ---")
+except Exception as e:
+    print(f"!!! FATAL ERROR: Could not load model: {e} !!!")
+    # The 'model' variable will remain None
+
+
+# --- API Endpoint Definition ---
+@app.route('/predict', methods=['POST'])
+def predict():
+    # Ensure the model was loaded correctly on startup
+    if model is None:
+        return jsonify({'success': False, 'error': 'Model is not loaded on the server.'}), 500
+
+    # 1. Get the JSON data sent from our Node.js backend
+    json_data = request.get_json()
+    if not json_data or 'image_data' not in json_data:
+        return jsonify({'success': False, 'error': 'Missing "image_data" in request body.'}), 400
+
+    image_data = json_data['image_data']
+
+    # 2. Validate input data shape (should be 14x7)
+    if not isinstance(image_data, list) or len(image_data) != 14 or len(image_data[0]) != 7:
+        return jsonify({'success': False, 'error': 'Input "image_data" must be a 14x7 matrix.'}), 400
+
+    # 3. Convert the input list into a PyTorch Tensor
+    try:
+        # Add batch and channel dimensions to make shape: [1, 1, 14, 7]
+        input_tensor = torch.FloatTensor(image_data).unsqueeze(0).unsqueeze(0)
+        input_tensor = input_tensor.to(DEVICE)
+    except Exception as e:
+        return jsonify({'success': False, 'error': f'Failed to process input data: {e}'}), 400
+
+    # 4. Make the prediction
+    with torch.no_grad(): # Disables gradient calculation for inference speed
+        pred_schedule_prob, pred_quantity_val = model(input_tensor)
+
+    # 5. Format the output for a clean JSON response
+    # Squeeze removes extra dimensions, .cpu() is good practice, .numpy() converts to numpy array
+    pred_schedule_prob = pred_schedule_prob.squeeze().cpu().numpy()
+    pred_quantity_val = pred_quantity_val.squeeze().cpu().numpy()
+
+    # Convert schedule probabilities to binary 0 or 1 based on a 0.5 threshold
+    schedule_result = (pred_schedule_prob > 0.5).astype(int).tolist()
+    
+    # Ensure quantity is not negative and convert to list, rounding to 2 decimal places
+    quantity_result = np.maximum(0, pred_quantity_val).round(2).tolist()
+
+    return jsonify({
+        'success': True,
+        'prediction': {
+            'schedule': schedule_result,
+            'quantity': quantity_result
+        }
+    })
+
+# A simple health check endpoint to verify the service is running
+@app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({'status': 'ok', 'model_loaded': model is not None})
+
+
+# --- Run the App ---
+if __name__ == '__main__':
+    # Use port 5002 to avoid conflict with the Node.js backend (5001)
+    # host='0.0.0.0' makes it accessible from other services (like our Node app)
+    app.run(host='0.0.0.0', port=5002)
+
+====================================================================
+==== FILE: ml-service/model_definition.py ====
+====================================================================
+
+# ml-service/model_definition.py
+import torch
+import torch.nn as nn
+
+# This class defines the custom "head" of our Vision Transformer.
+# It must be identical to the one used during training.
+class IrrigationViTHead(nn.Module):
+    def __init__(self, in_features, out_features=14):
+        super().__init__()
+        self.schedule_predictor = nn.Linear(in_features, out_features)
+        self.quantity_predictor = nn.Linear(in_features, out_features)
+
+    def forward(self, x):
+        # Apply sigmoid to schedule logits to get a 0-1 probability
+        # Apply ReLU to quantity to ensure it's not negative
+        return torch.sigmoid(self.schedule_predictor(x)), torch.relu(self.quantity_predictor(x))
+
+====================================================================
+==== FILE: ml-service/requirements.txt ====
+====================================================================
+
+Flask
+Flask-Cors
+torch
+timm
+numpy
+gunicorn
+
